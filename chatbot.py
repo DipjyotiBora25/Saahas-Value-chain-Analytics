@@ -313,6 +313,29 @@ _FLOATING_CSS = """
         min-width: 380px;
         max-width: 440px;
     }
+    /* Expanded chat: enlarge the popover without taking over the full viewport */
+    body.szw-chat-expanded div[data-testid="stPopover"]:last-of-type {
+        position: fixed !important;
+        bottom: 24px !important;
+        right: 24px !important;
+        width: 840px !important;
+        height: auto !important;
+        max-height: 820px !important;
+        margin: 0 !important;
+        z-index: 2147483647 !important;
+    }
+    body.szw-chat-expanded div[data-testid="stPopoverBody"] {
+        width: 840px !important;
+        min-width: 840px !important;
+        max-width: 840px !important;
+        min-height: 620px !important;
+        max-height: 760px !important;
+        border-radius: 1rem !important;
+        padding: 1rem !important;
+        box-shadow: 0 24px 60px rgba(15,23,42,0.15) !important;
+        overflow: auto !important;
+        background: #ffffff !important;
+    }
 </style>
 """
 
@@ -398,6 +421,10 @@ def _process_query(prompt: str, model: str, data_context: str) -> str:
 def render_floating_chatbot(sales_df: pd.DataFrame, purchase_df: pd.DataFrame) -> None:
     _inject_floating_assets()
 
+    # ensure the expanded flag exists
+    if "szw_chat_expanded" not in st.session_state:
+        st.session_state["szw_chat_expanded"] = False
+
     if "chat_messages" not in st.session_state:
         st.session_state["chat_messages"] = []
     if "groq_model" not in st.session_state:
@@ -411,6 +438,16 @@ def render_floating_chatbot(sales_df: pd.DataFrame, purchase_df: pd.DataFrame) -
     with _safe_popover("📎", help="Ask the data assistant"):
         st.markdown("### 📎 Saahas Data Assistant")
         st.caption("Runs via Groq Cloud API. Configure GROQ_API_KEY in .env or deployment secrets.")
+
+        # Expand / collapse controls
+        col_l, col_r = st.columns([1, 1])
+        with col_r:
+            if st.session_state.get("szw_chat_expanded"):
+                if st.button("⤢ Collapse", key="chat_collapse", use_container_width=True):
+                    st.session_state["szw_chat_expanded"] = False
+            else:
+                if st.button("⤢ Expand", key="chat_expand", use_container_width=True):
+                    st.session_state["szw_chat_expanded"] = True
 
         with st.expander("⚙️ Settings", expanded=False):
             model = st.text_input(
@@ -501,3 +538,17 @@ def render_floating_chatbot(sales_df: pd.DataFrame, purchase_df: pd.DataFrame) -
                         data_context,
                     )
             st.session_state["chat_messages"].append({"role": "assistant", "content": reply})
+
+    # Inject JS to toggle the fullscreen class on the parent document body
+    if st.session_state.get("szw_chat_expanded"):
+        components.html("""
+            <script>
+                try { window.parent.document.body.classList.add('szw-chat-expanded'); } catch(e) {}
+            </script>
+        """, height=0)
+    else:
+        components.html("""
+            <script>
+                try { window.parent.document.body.classList.remove('szw-chat-expanded'); } catch(e) {}
+            </script>
+        """, height=0)
