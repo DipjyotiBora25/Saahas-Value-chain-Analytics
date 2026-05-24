@@ -8,7 +8,7 @@ import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
 
-POWER_BI_URL = "https://app.powerbi.com/view?r=eyJrIjoiZWY1YzI4NTQtNzBhNC00ZmIyLTlhY2ItOTU5YmFhMGRlNWIzIiwidCI6IjBlNmEwM2I0LTI4YjktNGQ3Zi1hYzNjLTM4MTYzY2Q4MzYwMCIsImMiOjEwfQ%3D%3D&pageName=b95650c71f7ddf960bbf"
+POWER_BI_URL = "https://app.powerbi.com/reportEmbed?reportId=0a02e613-30b9-412d-847e-caa648cb0096&autoAuth=true&ctid=0e6a03b4-28b9-4d7f-ac3c-38163cd83600&actionBarEnabled=true&reportCopilotInEmbed=true"
 
 st.set_page_config(page_title="Saahas Zero Waste Analytics", page_icon="♻️", layout="wide")
 
