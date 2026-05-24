@@ -6,9 +6,11 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
+
+POWER_BI_URL = "https://app.powerbi.com/view?r=eyJrIjoiZWY1YzI4NTQtNzBhNC00ZmIyLTlhY2ItOTU5YmFhMGRlNWIzIiwidCI6IjBlNmEwM2I0LTI4YjktNGQ3Zi1hYzNjLTM4MTYzY2Q4MzYwMCIsImMiOjEwfQ%3D%3D&pageName=b95650c71f7ddf960bbf"
 
 st.set_page_config(page_title="Saahas Zero Waste Analytics", page_icon="♻️", layout="wide")
-
 
 # Import dashboard modules
 from sales_dashboard import render_revenue_insights
@@ -108,6 +110,12 @@ def app_styles():
             .tab-guide {display:flex;gap:var(--sp-2);flex-wrap:wrap;margin-bottom:var(--sp-3);}
             .tab-pill {padding:var(--sp-2) var(--sp-3);border-radius:var(--radius-pill);background:#f8fafc;border:1px solid #e2e8f0;color:#475569;font-size:var(--fs-2xs);}
             .tab-pill.active {background:#e0f2fe;color:#0369a1;border-color:#bae6fd;}
+            .landing-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;margin:1rem 0;}
+            .landing-card {background:white;padding:1.5rem;border-radius:1rem;box-shadow:0 18px 35px rgba(15,23,42,0.08);border:1px solid #e2e8f0;}
+            .landing-card h3 {margin-top:0;margin-bottom:0.75rem;color:#0f172a;}
+            .landing-card p {margin:0;color:#475569;line-height:1.7;}
+            .powerbi-embed-wrapper {width:100%;max-width:100vw;margin:0;padding:0;overflow:hidden;}
+            .powerbi-embed-wrapper iframe {width:100% !important;height:900px !important;border:none !important;}
         </style>
         """,
         unsafe_allow_html=True,
@@ -279,7 +287,6 @@ def render_overview(sales_df: pd.DataFrame, purchase_df: pd.DataFrame):
     st.markdown("<div class='tab-guide'><span class='tab-pill active'>Overview</span></div>", unsafe_allow_html=True)
     st.markdown("<div class='section-title'>Executive summary</div>", unsafe_allow_html=True)
     st.markdown("<div class='section-copy'>This overview brings together sales and purchase performance for Saahas Zero Waste. It highlights revenue, spend, profit, and high-impact categories across sales, procurement, and zero-waste operational flows.</div>", unsafe_allow_html=True)
-    
 
     st.markdown('<div class="metric-row">', unsafe_allow_html=True)
     metric_card("Total Revenue", f"₹{total_sales:,.0f}", "+18% vs last year", positive=True)
@@ -466,6 +473,40 @@ def render_category_comparison(sales_df: pd.DataFrame, purchase_df: pd.DataFrame
             st.dataframe(combined.drop(columns="_total").reset_index(drop=True), use_container_width=True)
 
 
+def render_landing_page():
+    st.markdown("<div class='section-title'>Choose your analytics experience</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='section-copy'>Select <strong>Data Analytics</strong> to analyse uploaded sales and purchase files, or choose <strong>Power BI Analytics</strong> to open the embedded report.</div>",
+        unsafe_allow_html=True,
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(
+            "<div class='landing-card'><h3>Data analytics</h3><p>Work with your uploaded data in the dashboard tabs: Overview, Sales, Purchase, Revenue Insights, and Spend Analysis.</p></div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Enter data analytics", key="landing_data"):
+            st.session_state.current_page = "analytics"
+    with col2:
+        st.markdown(
+            "<div class='landing-card'><h3>Power BI analytics</h3><p>Open the embedded Power BI report for business intelligence insights and executive dashboards.</p></div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Enter Power BI analytics", key="landing_powerbi"):
+            st.session_state.current_page = "powerbi"
+
+
+def render_powerbi_page():
+    st.markdown("<div class='section-title'>Power BI analytics</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-copy'>This page shows the embedded Power BI report for rich BI insight.</div>", unsafe_allow_html=True)
+    st.components.v1.html(
+        f'<iframe title="PowerBI" width="100%" height="800" src="{POWER_BI_URL}" frameborder="0" allowFullScreen="true"></iframe>',
+        height=850,
+    )
+    if st.button("Back to landing page", key="powerbi_back"):
+        st.session_state.current_page = "landing"
+
+
 def render_sales(sales_df: pd.DataFrame):
     if sales_df.empty:
         st.warning("Upload sales data to populate this view.")
@@ -621,46 +662,55 @@ def main():
             st.markdown("<div class='meta-chip'>Reporting Period: FY 2026–27</div>", unsafe_allow_html=True)
             st.markdown("<div class='meta-chip'>Built for Saahas Zero Waste Company</div>", unsafe_allow_html=True)
 
-    with st.container():
-        st.markdown('<div class="upload-card">', unsafe_allow_html=True)
-        col1, col2 = st.columns(2)
-        with col1:
-            sales_file = st.file_uploader("Upload Sales data", type=["csv", "xls", "xlsx"], key="sales_upload")
-        with col2:
-            purchase_file = st.file_uploader("Upload Purchase data", type=["csv", "xls", "xlsx"], key="purchase_upload")
-        st.markdown("</div>", unsafe_allow_html=True)
+    if "current_page" not in st.session_state:
+        st.session_state.current_page = "landing"
 
-    if sales_file is not None:
-        sales_df = read_tabular(sales_file)
-        sales_source = sales_file.name
+    sales_df = pd.DataFrame()
+    purchase_df = pd.DataFrame()
+    sales_source = "No sales file uploaded"
+    purchase_source = "No purchase file uploaded"
+
+    if st.session_state.current_page == "landing":
+        render_landing_page()
+    elif st.session_state.current_page == "powerbi":
+        render_powerbi_page()
     else:
-        sales_df = pd.DataFrame()
-        sales_source = "No sales file uploaded"
+        with st.container():
+            st.markdown('<div class="upload-card">', unsafe_allow_html=True)
+            col1, col2 = st.columns(2)
+            with col1:
+                sales_file = st.file_uploader("Upload Sales data", type=["csv", "xls", "xlsx"], key="sales_upload")
+            with col2:
+                purchase_file = st.file_uploader("Upload Purchase data", type=["csv", "xls", "xlsx"], key="purchase_upload")
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    if purchase_file is not None:
-        purchase_df = read_tabular(purchase_file)
-        purchase_source = purchase_file.name
-    else:
-        purchase_df = pd.DataFrame()
-        purchase_source = "No purchase file uploaded"
+        if sales_file is not None:
+            sales_df = read_tabular(sales_file)
+            sales_source = sales_file.name
 
-    sales_df = normalize_sales(sales_df)
-    purchase_df = normalize_purchase(purchase_df)
+        if purchase_file is not None:
+            purchase_df = read_tabular(purchase_file)
+            purchase_source = purchase_file.name
 
-    st.markdown(f"<div class='small-caption'>Sales source: {sales_source} • Purchase source: {purchase_source}</div>", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
+        sales_df = normalize_sales(sales_df)
+        purchase_df = normalize_purchase(purchase_df)
 
-    tabs = st.tabs(["Overview", "Sales", "Purchase", "Revenue Insights", "Spend Analysis"])
-    with tabs[0]:
-        render_overview(sales_df, purchase_df)
-    with tabs[1]:
-        render_sales(sales_df)
-    with tabs[2]:
-        render_purchase(purchase_df)
-    with tabs[3]:
-        render_revenue_insights(sales_df)
-    with tabs[4]:
-        render_spend_analysis(purchase_df)
+        st.markdown(f"<div class='small-caption'>Sales source: {sales_source} • Purchase source: {purchase_source}</div>", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        if st.button("Back to landing page", key="analytics_back"):
+            st.session_state.current_page = "landing"
+        tabs = st.tabs(["Overview", "Sales", "Purchase", "Revenue Insights", "Spend Analysis"])
+        with tabs[0]:
+            render_overview(sales_df, purchase_df)
+        with tabs[1]:
+            render_sales(sales_df)
+        with tabs[2]:
+            render_purchase(purchase_df)
+        with tabs[3]:
+            render_revenue_insights(sales_df)
+        with tabs[4]:
+            render_spend_analysis(purchase_df)
 
     st.markdown('</div>', unsafe_allow_html=True)
 

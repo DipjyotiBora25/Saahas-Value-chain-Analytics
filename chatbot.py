@@ -1,13 +1,12 @@
-"""Floating Ollama-powered chatbot for interpreting uploaded sales & purchase data.
+"""Floating Groq-powered chatbot for interpreting uploaded sales & purchase data.
 
 Renders a circular robot button fixed to the bottom-right corner. The button
 pulses and shows a "Need help?" nudge after the user has been idle for 60s.
-Clicking opens a popover with a chat interface that streams responses from a
-local Ollama server (default http://localhost:11434).
+Clicking opens a popover with a chat interface that uses Groq Cloud for LLM
+inference.
 
 Setup:
-    Install Ollama (https://ollama.com), then in a terminal:
-        ollama pull llama3.2     # or qwen2.5:3b for a lighter model
+    Set GROQ_API_KEY and GROQ_MODEL_NAME in `.env` or your deployment environment.
 """
 
 from __future__ import annotations
@@ -15,30 +14,47 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
-from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
-import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from dotenv import load_dotenv
+from groq import Groq
 
-MODELFILE_PATH = Path(__file__).resolve().parent / "Modelfile.saahas-analyst"
-CUSTOM_MODEL_NAME = "saahas-analyst"
+load_dotenv()
 
-
-def get_default_host() -> str:
-    """Return the configured Ollama host, preferring Streamlit secrets first."""
-    host = os.getenv("OLLAMA_API_URL") or os.getenv("OLLAMA_HOST")
-    try:
-        host = st.secrets.get("OLLAMA_API_URL", host)
-    except Exception:
-        pass
-    return (host or "http://localhost:11434").rstrip("/")
-
-FALLBACK_MODELS = ["llama3.2", "qwen2.5:3b", "phi3", "mistral", "gemma2:2b"]
+GROQ_MODEL_DEFAULT = "llama-3.3-70b-versatile"
 IDLE_MS = 60_000
+MAX_HISTORY_TURNS = 8
+
+@st.cache_resource
+def get_groq_client() -> Groq:
+    """Initialize and cache the Groq client using environment configuration."""
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "GROQ_API_KEY environment variable is missing. Set it in .env or in your deployment environment."
+        )
+    return Groq(api_key=api_key)
+
+
+def get_chat_response(messages: list[dict], model_name: str | None = None) -> str:
+    """Call the Groq Cloud chat completions API and return the assistant response."""
+    model_name = model_name or os.getenv("GROQ_MODEL_NAME", GROQ_MODEL_DEFAULT)
+    client = get_groq_client()
+    try:
+        completion = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            temperature=0.2,
+        )
+        if hasattr(completion, "choices") and completion.choices:
+            return completion.choices[0].message.content
+        return completion["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"Error calling Groq Cloud API: {e}")
+        raise
 
 
 def _safe_popover(label: str, help: str | None = None):
@@ -52,44 +68,9 @@ def _safe_toggle(label: str, value: bool = False, key: str | None = None) -> boo
         return st.toggle(label, value=value, key=key)
     return st.checkbox(label, value=value, key=key)
 
-# ── Performance tuning sent with every chat request ───────────────────────
-# keep_alive holds the model resident on GPU between turns, killing the
-# 5-30s cold-load lag. Matches the OLLAMA_KEEP_ALIVE=30m server setting.
-KEEP_ALIVE = "30m"
-# Generation options: low temperature for factual data analysis, capped
-# response length, larger context for full data summary + chat history.
-GEN_OPTIONS = {
-    "temperature": 0.2,
-    "top_p": 0.9,
-    "top_k": 40,
-    "num_predict": 512,
-    "num_ctx": 8192,
-}
 # History compaction: keep the last N user/assistant turns to avoid
 # re-evaluating the entire transcript every request.
 MAX_HISTORY_TURNS = 8
-
-# Reasoning models burn 1–5k tokens on internal <think>...</think> before
-# answering. Default generation budget would truncate them mid-thought, so
-# we widen num_predict and num_ctx whenever the model name matches.
-REASONING_HINTS = ("deepseek-r1", "r1-distill", "qwq", "reasoning", "o1-", "marco-o1")
-REASONING_OPTIONS = {
-    "temperature": 0.3,
-    "top_p": 0.95,
-    "top_k": 40,
-    "num_predict": 4096,
-    "num_ctx": 16384,
-}
-
-
-def _is_reasoning_model(name: str) -> bool:
-    nl = (name or "").lower()
-    return any(h in nl for h in REASONING_HINTS)
-
-
-def _options_for(model: str) -> dict:
-    return REASONING_OPTIONS if _is_reasoning_model(model) else GEN_OPTIONS
-
 
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 
@@ -114,93 +95,7 @@ def _format_reasoning(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Ollama helpers
-# ---------------------------------------------------------------------------
-
-def list_ollama_models(host: str) -> list[str]:
-    host = (host or "").strip()
-    if not host:
-        return []
-    try:
-        r = requests.get(f"{host.rstrip('/')}/api/tags", timeout=3)
-        r.raise_for_status()
-        return [m["name"] for m in r.json().get("models", []) if "name" in m]
-    except Exception:
-        return []
-
-
-def _stream_chat(host: str, model: str, messages: list[dict]) -> Iterable[str]:
-    url = f"{host.rstrip('/')}/api/chat"
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-        "keep_alive": KEEP_ALIVE,
-        "options": _options_for(model),
-    }
-    with requests.post(url, json=payload, stream=True, timeout=300) as r:
-        r.raise_for_status()
-        for line in r.iter_lines(decode_unicode=True):
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if "error" in obj:
-                raise RuntimeError(obj["error"])
-            chunk = obj.get("message", {}).get("content", "")
-            if chunk:
-                yield chunk
-            if obj.get("done"):
-                break
-
-
-def build_saahas_analyst_model() -> tuple[bool, str]:
-    """Run `ollama create saahas-analyst -f Modelfile.saahas-analyst`.
-    Requires the base model in the Modelfile's FROM line to already be pulled."""
-    if not MODELFILE_PATH.exists():
-        return False, f"Modelfile not found at {MODELFILE_PATH}"
-    try:
-        proc = subprocess.run(
-            ["ollama", "create", CUSTOM_MODEL_NAME, "-f", str(MODELFILE_PATH)],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        if proc.returncode == 0:
-            return True, (
-                f"✅ Built `{CUSTOM_MODEL_NAME}`. Select it from the model dropdown."
-            )
-        err = (proc.stderr or proc.stdout or "").strip()
-        if "not found" in err.lower() or "pull" in err.lower():
-            return False, (
-                f"Base model in Modelfile is not pulled yet. Open it and check the "
-                f"`FROM` line, then run `ollama pull <that model>` first.\n\n```\n{err}\n```"
-            )
-        return False, f"`ollama create` failed:\n\n```\n{err}\n```"
-    except FileNotFoundError:
-        return False, "`ollama` command not found on PATH. Install Ollama and restart the app."
-    except subprocess.TimeoutExpired:
-        return False, "`ollama create` timed out after 5 minutes."
-
-
-def warm_up_model(host: str, model: str) -> tuple[bool, str]:
-    """Preload the model into memory so the first real query is fast.
-    Sends an empty prompt with keep_alive — Ollama loads the model without
-    generating anything."""
-    try:
-        r = requests.post(
-            f"{host.rstrip('/')}/api/generate",
-            json={"model": model, "prompt": "", "keep_alive": KEEP_ALIVE},
-            timeout=120,
-        )
-        r.raise_for_status()
-        return True, f"Model `{model}` is loaded and will stay warm for {KEEP_ALIVE}."
-    except requests.exceptions.ConnectionError:
-        return False, f"Could not reach Ollama at {host}."
-    except Exception as e:
-        return False, f"Warm-up failed: {e}"
+# Data context — turns the uploaded dataframes into a compact text summary
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +216,7 @@ def build_data_context(sales_df: pd.DataFrame, purchase_df: pd.DataFrame) -> str
 def _df_fingerprint(df: pd.DataFrame | None) -> tuple | None:
     """Cheap signature: shape + columns + a sample row. Used to detect when
     the data context needs to be rebuilt — otherwise we keep the identical
-    system prompt across turns so Ollama can reuse its prefix KV cache."""
+    assistant prompt across turns for more consistent Groq responses."""
     if df is None or df.empty:
         return None
     try:
@@ -459,7 +354,7 @@ def _inject_floating_assets() -> None:
 # Chat handling — explicit accumulator so streaming is reliable
 # ---------------------------------------------------------------------------
 
-def _process_query(prompt: str, host: str, model: str, data_context: str) -> str:
+def _process_query(prompt: str, model: str, data_context: str) -> str:
     system_msg = {
         "role": "system",
         "content": (
@@ -471,8 +366,6 @@ def _process_query(prompt: str, host: str, model: str, data_context: str) -> str
             f"=== DATA CONTEXT ===\n{data_context}\n=== END CONTEXT ==="
         ),
     }
-    # Trim to last N turns (user + assistant pairs) so we don't re-evaluate
-    # an ever-growing transcript. The current user prompt is already at the end.
     history = st.session_state["chat_messages"][-(MAX_HISTORY_TURNS * 2):]
     api_messages = [system_msg] + [
         {"role": m["role"], "content": m["content"]} for m in history
@@ -480,46 +373,20 @@ def _process_query(prompt: str, host: str, model: str, data_context: str) -> str
 
     placeholder = st.empty()
     placeholder.markdown("_Thinking…_")
-    accumulated = ""
     try:
-        for chunk in _stream_chat(host, model, api_messages):
-            accumulated += chunk
-            placeholder.markdown(
-                _format_reasoning(accumulated) + "▌", unsafe_allow_html=True
-            )
-        if accumulated:
-            placeholder.markdown(_format_reasoning(accumulated), unsafe_allow_html=True)
-            return accumulated
-        msg = "_(empty response from model — try a different model or rephrase)_"
-        placeholder.markdown(msg)
-        return msg
-    except requests.exceptions.ConnectionError:
-        msg = (
-            f"❌ Could not connect to Ollama at `{host}`.\n\n"
-            "Make sure Ollama is installed and running:\n"
-            "1. Install: https://ollama.com\n"
-            "2. Run: `ollama serve` (Windows app starts it automatically)\n"
-            "3. Pull a model: `ollama pull llama3.2:3b`"
-        )
-        placeholder.error(msg)
-        return msg
-    except requests.exceptions.HTTPError as e:
-        try:
-            err = e.response.json().get("error", str(e))
-        except Exception:
-            err = str(e)
-        if "not found" in err.lower() or "pull" in err.lower():
-            msg = f"❌ Model `{model}` is not installed.\n\nRun: `ollama pull {model}`"
-        else:
-            msg = f"❌ Ollama error: {err}"
-        placeholder.error(msg)
-        return msg
-    except RuntimeError as e:
-        msg = f"❌ Ollama returned an error: {e}"
+        reply = get_chat_response(api_messages, model_name=model)
+        if not reply:
+            msg = "_(empty response from model — try a different prompt)_"
+            placeholder.markdown(msg)
+            return msg
+        placeholder.markdown(_format_reasoning(reply), unsafe_allow_html=True)
+        return reply
+    except ValueError as e:
+        msg = str(e)
         placeholder.error(msg)
         return msg
     except Exception as e:
-        msg = f"❌ Unexpected error: {e}"
+        msg = f"❌ Groq Cloud API error: {e}"
         placeholder.error(msg)
         return msg
 
@@ -533,6 +400,8 @@ def render_floating_chatbot(sales_df: pd.DataFrame, purchase_df: pd.DataFrame) -
 
     if "chat_messages" not in st.session_state:
         st.session_state["chat_messages"] = []
+    if "groq_model" not in st.session_state:
+        st.session_state["groq_model"] = os.getenv("GROQ_MODEL_NAME", GROQ_MODEL_DEFAULT)
 
     data_context = get_data_context_cached(sales_df, purchase_df)
     no_data = (sales_df is None or sales_df.empty) and (
@@ -541,58 +410,23 @@ def render_floating_chatbot(sales_df: pd.DataFrame, purchase_df: pd.DataFrame) -
 
     with _safe_popover("📎", help="Ask the data assistant"):
         st.markdown("### 📎 Saahas Data Assistant")
-        st.caption("Runs locally via Ollama — your data never leaves this machine.")
+        st.caption("Runs via Groq Cloud API. Configure GROQ_API_KEY in .env or deployment secrets.")
 
         with st.expander("⚙️ Settings", expanded=False):
-            default_host = st.session_state.get("ollama_host", get_default_host())
-            host = st.text_input(
-                "Ollama host",
-                value=default_host,
-                key="ollama_host_input",
+            model = st.text_input(
+                "Groq model name",
+                value=st.session_state.get("groq_model", os.getenv("GROQ_MODEL_NAME", GROQ_MODEL_DEFAULT)),
+                key="groq_model_input",
             )
-            st.session_state["ollama_host"] = host
-
-            available = list_ollama_models(host)
-            if available:
-                prev = st.session_state.get("ollama_model")
-                idx = available.index(prev) if prev in available else 0
-                model = st.selectbox("Model", available, index=idx, key="ollama_model_select")
-            else:
-                st.warning(
-                    "Ollama is unreachable at the configured host. "
-                    "For cloud deployment, set `OLLAMA_API_URL` to an external Ollama server and ensure the model is pulled there."
+            st.session_state["groq_model"] = model
+            if not os.getenv("GROQ_API_KEY"):
+                st.error(
+                    "GROQ_API_KEY is not configured. Set GROQ_API_KEY in `.env` or your deployment environment."
                 )
-                st.markdown(
-                    "- If you are running locally, start Ollama: `ollama serve`.\n"
-                    "- If you are hosting remotely, point `OLLAMA_API_URL` to your remote Ollama server and pre-pull the model there.\n"
-                    "- Example: `ollama pull llama3.2` on the remote host.",
-                    unsafe_allow_html=False,
-                )
-                model = st.selectbox(
-                    "Model (typed — not verified)",
-                    FALLBACK_MODELS,
-                    index=0,
-                    key="ollama_model_fallback",
-                )
-
-            verify_col, refresh_col = st.columns([3, 1])
-            with verify_col:
-                if st.button("Verify Ollama host", use_container_width=True):
-                    verified = list_ollama_models(host)
-                    if verified:
-                        st.success(
-                            f"✅ Ollama is reachable at {host}. {len(verified)} model(s) available."
-                        )
-                    else:
-                        st.error(
-                            f"❌ Could not contact Ollama at {host}. "
-                            "For cloud hosting, set `OLLAMA_API_URL` to your remote Ollama server and make sure the model is pulled there."
-                        )
-            with refresh_col:
-                if st.button("Refresh models", use_container_width=True):
-                    st.experimental_rerun()
-
-            st.session_state["ollama_model"] = model
+            st.markdown(
+                "This assistant uses Groq Cloud for inference. "
+                "Configure `GROQ_API_KEY` and optionally `GROQ_MODEL_NAME` in your environment."
+            )
 
             show_ctx = _safe_toggle(
                 "Show data context",
@@ -606,34 +440,8 @@ def render_floating_chatbot(sales_df: pd.DataFrame, purchase_df: pd.DataFrame) -
                     st.session_state["chat_messages"] = []
                     st.rerun()
             with col_b:
-                if st.button("🔥 Warm up model", use_container_width=True,
-                             help=f"Preload {model} into memory (keep-alive {KEEP_ALIVE})"):
-                    with st.spinner(f"Loading {model}…"):
-                        ok, msg = warm_up_model(host, model)
-                    (st.success if ok else st.error)(msg)
-
-            st.markdown("---")
-            st.markdown("**📦 Specialized Saahas analyst model**")
-            st.caption(
-                "Wraps a small base model with a Saahas-specific system prompt + "
-                "tuned parameters, registered as a named Ollama model. "
-                f"Edit `{MODELFILE_PATH.name}` to swap the base (e.g. `deepseek-r1:1.5b` "
-                "for a reasoning model)."
-            )
-            if st.button(f"🔨 Build `{CUSTOM_MODEL_NAME}` model", use_container_width=True):
-                with st.spinner("Running `ollama create`…"):
-                    ok, msg = build_saahas_analyst_model()
-                (st.success if ok else st.error)(msg)
-
-            opts = _options_for(model)
-            mode = "🧠 reasoning preset" if _is_reasoning_model(model) else "⚡ fast preset"
-            st.caption(
-                f"{mode}: temp={opts['temperature']}, ctx={opts['num_ctx']}, "
-                f"max_tokens={opts['num_predict']}, keep_alive={KEEP_ALIVE}, "
-                f"history={MAX_HISTORY_TURNS} turns. "
-                "Server-side tuning (flash_attn, q8_0 KV cache, num_parallel=1) "
-                "comes from `start_ollama.ps1`."
-            )
+                if st.button("Refresh", use_container_width=True):
+                    st.experimental_rerun()
 
         if no_data:
             st.info("📂 Upload sales or purchase data above to chat about it.")
@@ -689,8 +497,7 @@ def render_floating_chatbot(sales_df: pd.DataFrame, purchase_df: pd.DataFrame) -
                 with st.chat_message("assistant"):
                     reply = _process_query(
                         prompt,
-                        st.session_state["ollama_host"],
-                        st.session_state["ollama_model"],
+                        st.session_state["groq_model"],
                         data_context,
                     )
             st.session_state["chat_messages"].append({"role": "assistant", "content": reply})
